@@ -62,40 +62,40 @@ jobs:
           ls -la hsdaoh_deps/include/
           
           # Create the hsdaoh.h header directly
-          cat > hsdaoh_deps/include/hsdaoh.h << 'EOF'
-#ifndef HSDAOH_H
-#define HSDAOH_H
-
-#include <stdint.h>
-#include <stdbool.h>
-
-#ifdef __cplusplus
-extern "C" {
-#endif
-
-/* hsdaoh device handle */
-typedef struct hsdaoh_dev hsdaoh_dev_t;
-
-/* Callback function for data reception */
-typedef void (*hsdaoh_read_async_cb_t)(unsigned char *buf, uint32_t len, uint8_t pack_state, void *ctx);
-
-/* Callback function for messages */
-typedef void (*hsdaoh_msg_cb_t)(int msg_type, int msg, void *additional, void *ctx);
-
-/* Function declarations */
-int hsdaoh_open_msg_cb(hsdaoh_dev_t **dev, uint32_t index, hsdaoh_msg_cb_t cb, void *ctx);
-int hsdaoh_close(hsdaoh_dev_t *dev);
-int hsdaoh_start_stream(hsdaoh_dev_t *dev, hsdaoh_read_async_cb_t cb, void *ctx);
-int hsdaoh_stop_stream(hsdaoh_dev_t *dev);
-int hsdaoh_get_usb_strings(hsdaoh_dev_t *dev, char *manufact, char *product, char *serial);
-const char* hsdaoh_get_message_string(int msg_type, int msg, void *additional, void *ctx);
-
-#ifdef __cplusplus
-}
-#endif
-
-#endif /* HSDAOH_H */
-EOF
+          printf '%s\n' \
+            '#ifndef HSDAOH_H' \
+            '#define HSDAOH_H' \
+            '' \
+            '#include <stdint.h>' \
+            '#include <stdbool.h>' \
+            '' \
+            '#ifdef __cplusplus' \
+            'extern "C" {' \
+            '#endif' \
+            '' \
+            '/* hsdaoh device handle */' \
+            'typedef struct hsdaoh_dev hsdaoh_dev_t;' \
+            '' \
+            '/* Callback function for data reception */' \
+            'typedef void (*hsdaoh_read_async_cb_t)(unsigned char *buf, uint32_t len, uint8_t pack_state, void *ctx);' \
+            '' \
+            '/* Callback function for messages */' \
+            'typedef void (*hsdaoh_msg_cb_t)(int msg_type, int msg, void *additional, void *ctx);' \
+            '' \
+            '/* Function declarations */' \
+            'int hsdaoh_open_msg_cb(hsdaoh_dev_t **dev, uint32_t index, hsdaoh_msg_cb_t cb, void *ctx);' \
+            'int hsdaoh_close(hsdaoh_dev_t *dev);' \
+            'int hsdaoh_start_stream(hsdaoh_dev_t *dev, hsdaoh_read_async_cb_t cb, void *ctx);' \
+            'int hsdaoh_stop_stream(hsdaoh_dev_t *dev);' \
+            'int hsdaoh_get_usb_strings(hsdaoh_dev_t *dev, char *manufact, char *product, char *serial);' \
+            'const char* hsdaoh_get_message_string(int msg_type, int msg, void *additional, void *ctx);' \
+            '' \
+            '#ifdef __cplusplus' \
+            '}' \
+            '#endif' \
+            '' \
+            '#endif /* HSDAOH_H */' \
+            > hsdaoh_deps/include/hsdaoh.h
           
           # Set environment for CMake
           echo "HSDAOH_ROOT=$(pwd)/hsdaoh_deps" >> $GITHUB_ENV
