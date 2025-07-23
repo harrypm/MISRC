@@ -117,8 +117,6 @@ There are 2 tools currently and a few dependencies required to deploy a MISRC.
 - MISRC Extract
 - hsdaoh library
 
-
-
 > [!WARNING]  
 > The main hsdaoh branch (steve-m) does not have the required changes merged yet, ensure the above liked repo is used for install or your application will not build.
 
