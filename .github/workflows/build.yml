@@ -2,6 +2,12 @@ name: "Build and release binary"
 
 on:
   workflow_dispatch:
+  pull_request:
+    types:
+      - opened
+      - synchronize
+      - reopened
+      - ready_for_review
   push:
     tags:
       - "misrc_tools-*"
