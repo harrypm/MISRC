@@ -1545,6 +1545,29 @@ int gui_app_start_capture(gui_app_t *app) {
         }
         int fx3_rc = gui_fx3_start(app);
         if (fx3_rc == 0) {
+            // Set capture-start time + timestamp + clear reconnect state so the
+            // auto-reconnect watchdog (misrc_gui.c) does not immediately fire.
+            // FX3 (fx3usbadc) does not deliver data until the 0x91 start command
+            // is sent (done inside gui_fx3_start), so the 5s grace period must
+            // begin here, not at app init. Without this, capture_start_time stays
+            // 0 and the watchdog reaps the session within 2s -> connect loop.
+            app->capture_start_time = GetTime();
+            app->reconnect_pending = false;
+            app->reconnect_attempts = 0;
+            app->capture_backend_upstream = false;
+            app->capture_has_channel_b = false;  // fx3usbadc is single-channel (ADC A only)
+            {
+                time_t t = time(NULL);
+                struct tm tmv;
+#if defined(_WIN32) || defined(_WIN64)
+                localtime_s(&tmv, &t);
+#else
+                localtime_r(&t, &tmv);
+#endif
+                snprintf(app->capture_timestamp, sizeof(app->capture_timestamp), "%04d.%02d.%02d_%02d.%02d.%02d",
+                         (tmv.tm_year + 1900), (tmv.tm_mon + 1), (tmv.tm_mday),
+                         (tmv.tm_hour), (tmv.tm_min), (tmv.tm_sec));
+            }
             gui_capture_hold_power_assertions();
         } else {
             proc_set_priority(PROC_PRIORITY_NORMAL);
@@ -1567,6 +1590,26 @@ int gui_app_start_capture(gui_app_t *app) {
         }
         int ddd_rc = gui_ddd_start(app);
         if (ddd_rc == 0) {
+            // Same watchdog fix as FX3: capture_start_time must be set here or
+            // the auto-reconnect watchdog fires within 2s (DdD streams
+            // immediately on bulk submit, but the grace baseline still matters).
+            app->capture_start_time = GetTime();
+            app->reconnect_pending = false;
+            app->reconnect_attempts = 0;
+            app->capture_backend_upstream = false;
+            app->capture_has_channel_b = false;  // DdD is single-channel (ADC A only)
+            {
+                time_t t = time(NULL);
+                struct tm tmv;
+#if defined(_WIN32) || defined(_WIN64)
+                localtime_s(&tmv, &t);
+#else
+                localtime_r(&t, &tmv);
+#endif
+                snprintf(app->capture_timestamp, sizeof(app->capture_timestamp), "%04d.%02d.%02d_%02d.%02d.%02d",
+                         (tmv.tm_year + 1900), (tmv.tm_mon + 1), (tmv.tm_mday),
+                         (tmv.tm_hour), (tmv.tm_min), (tmv.tm_sec));
+            }
             gui_capture_hold_power_assertions();
         } else {
             proc_set_priority(PROC_PRIORITY_NORMAL);
