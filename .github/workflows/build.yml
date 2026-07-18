@@ -264,6 +264,11 @@ jobs:
           grep -qi "Usage" /tmp/misrc_capture_help.txt
           grep -qi "Usage" /tmp/misrc_extract_help.txt
 
+      - name: Post-build CI guard tests (vendored deps + FX3 enabled)
+        run: |
+          set -eux
+          python3 misrc_tools/test/ci_guard_tests.py --post-build --gui-path "$BUILD_DIR/misrc_gui"
+
       - name: Package AppImage artifact
         env:
           BUILD_VERSION: ${{ steps.version.outputs.version }}
@@ -599,6 +604,11 @@ jobs:
           grep -qi "Usage" capture_help.txt
           grep -qi "Usage" extract_help.txt
 
+          # Post-build CI guard tests: assert no stale hsdaoh DLL dependency
+          # (Windows statically links the vendored .deps/install libhsdaoh.a)
+          # and that FX3 symbols compiled in. Uses MSYS2 python + objdump.
+          python misrc_tools/test/ci_guard_tests.py --post-build --gui-path "$BUILD_DIR/misrc_gui.exe"
+
       - name: Create ZIP artifact
         shell: pwsh
         run: |
@@ -788,6 +798,9 @@ jobs:
 
           assert_no_nonsystem_dlls "dist/MISRC.exe"
           # Windows ARM64 binaries cannot be executed on windows-2022 x64 runners.
+          # Post-build CI guard tests still run (binary introspection only, no exec):
+          # assert no stale hsdaoh DLL dependency (static link expected) + FX3 symbols.
+          python misrc_tools/test/ci_guard_tests.py --post-build --gui-path "$BUILD_DIR/misrc_gui.exe"
 
       - name: Create ZIP artifact
         shell: pwsh
@@ -931,6 +944,10 @@ jobs:
           test "$RC_EXTRACT" -eq 1
           grep -qi "Usage" /tmp/macos_capture_help.txt
           grep -qi "Usage" /tmp/macos_extract_help.txt
+
+          # Post-build CI guard tests: assert no stale Homebrew hsdaoh linkage
+          # (macOS must use the vendored .deps/install hsdaoh via @rpath) + FX3 symbols.
+          python3 misrc_tools/test/ci_guard_tests.py --post-build --gui-path "$BUILD_DIR/misrc_gui"
 
           APP_ROOT="dist/MISRC.app/Contents"
           FW_DIR="$APP_ROOT/Frameworks"

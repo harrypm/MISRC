@@ -17,17 +17,10 @@
 #else
 #include "libusb_compat.h"
 #endif
-
-// FX3 USB VID/PID
-// #define FX3_VID              0x04B4
-// #define FX3_PID_BOOTLOADER   0x00F3
-// #define FX3_PID_MISRC        0x00F1
-// #endif
-
-
 // FX3 USB VID/PID
 #define FX3_VID              0x04B4
 #define FX3_PID_BOOTLOADER   0x00F3
+#define FX3_PID_FX3USBADC    0x00F1
 #define FX3_PID_MISRC        0x1234
 #endif
 
@@ -86,6 +79,7 @@ static misrc_device_info_t *device_list_add(misrc_device_list_t *list)
     list->count++;
     return dev;
 }
+
 
 /*-----------------------------------------------------------------------------
  * Device Enumeration
@@ -181,69 +175,31 @@ int misrc_device_enumerate_fx3(misrc_device_list_t *list, bool include_hsdaoh,
         return (int)list->count;
     }
 
-    /* Enumerate FX3 devices */
-#ifdef __linux__
-    int num_devices = cyusb_open();
-    if (num_devices < 0) {
-        /* cyusb init failed, but we still have other devices */
-        return (int)list->count;
-    }
-
-    for (int i = 0; i < num_devices; i++) {
-        cyusb_handle *h = cyusb_gethandle(i);
-        if (!h) continue;
-
-        struct libusb_device_descriptor desc;
-        if (libusb_get_device_descriptor(libusb_get_device(h), &desc) == 0) {
-            if (desc.idVendor == FX3_VID &&
-                (desc.idProduct == FX3_PID_MISRC || desc.idProduct == FX3_PID_BOOTLOADER)) {
-
-                misrc_device_info_t *dev = device_list_add(list);
-                if (!dev) {
-                    cyusb_close();
-                    return -1;
-                }
-
-                dev->type = MISRC_DEVICE_TYPE_FX3;
-                dev->index = i;
-
-                int bus = libusb_get_bus_number(libusb_get_device(h));
-                int addr = libusb_get_device_address(libusb_get_device(h));
-                snprintf(dev->name, sizeof(dev->name),
-                         "Cypress FX3 (Bus %d, Addr %d)", bus, addr);
-
-                /* Try to get serial number */
-                dev->device_id[0] = '\0';
-                if (desc.iSerialNumber) {
-                    unsigned char serial[64];
-                    if (libusb_get_string_descriptor_ascii(h, desc.iSerialNumber,
-                                                           serial, sizeof(serial)) > 0) {
-                        snprintf(dev->device_id, sizeof(dev->device_id), "%s", serial);
-                    }
-                }
-
-                dev->supports_1080p60 = false;  /* N/A for FX3 */
-            }
-        }
-    }
-
-    cyusb_close();
-#else
-    /* Other platforms: use libusb */
+    /* Enumerate FX3 devices via libusb */
     libusb_context *ctx = NULL;
+#if LIBUSB_API_VERSION >= 0x0100010A
+    if (libusb_init_context(&ctx, NULL, 0) != 0) {
+#else
     if (libusb_init(&ctx) != 0) {
+#endif
         return (int)list->count;
     }
 
     libusb_device **devlist;
     ssize_t num_devices = libusb_get_device_list(ctx, &devlist);
+    if (num_devices < 0) {
+        libusb_exit(ctx);
+        return (int)list->count;
+    }
 
     int fx3_index = 0;
     for (ssize_t i = 0; i < num_devices; i++) {
         struct libusb_device_descriptor desc;
         if (libusb_get_device_descriptor(devlist[i], &desc) == 0) {
             if (desc.idVendor == FX3_VID &&
-                (desc.idProduct == FX3_PID_MISRC || desc.idProduct == FX3_PID_BOOTLOADER)) {
+                (desc.idProduct == FX3_PID_MISRC ||
+                 desc.idProduct == FX3_PID_FX3USBADC ||
+                 desc.idProduct == FX3_PID_BOOTLOADER)) {
 
                 misrc_device_info_t *dev = device_list_add(list);
                 if (!dev) {
@@ -255,12 +211,28 @@ int misrc_device_enumerate_fx3(misrc_device_list_t *list, bool include_hsdaoh,
                 dev->type = MISRC_DEVICE_TYPE_FX3;
                 dev->index = fx3_index++;
 
-                int bus = libusb_get_bus_number(devlist[i]);
-                int addr = libusb_get_device_address(devlist[i]);
-                snprintf(dev->name, sizeof(dev->name),
-                         "Cypress FX3 (Bus %d, Addr %d)", bus, addr);
+                const char *fx3_name = "Cypress FX3";
+                if (desc.idProduct == FX3_PID_FX3USBADC) {
+                    fx3_name = "Fx3ADC";
+                } else if (desc.idProduct == FX3_PID_BOOTLOADER) {
+                    fx3_name = "FX3 Bootloader";
+                }
+                snprintf(dev->name, sizeof(dev->name), "%s", fx3_name);
 
                 dev->device_id[0] = '\0';
+                if (desc.iSerialNumber) {
+                    libusb_device_handle *tmp_handle = NULL;
+                    if (libusb_open(devlist[i], &tmp_handle) == 0 && tmp_handle) {
+                        unsigned char serial[64];
+                        if (libusb_get_string_descriptor_ascii(tmp_handle,
+                                                               desc.iSerialNumber,
+                                                               serial,
+                                                               sizeof(serial)) > 0) {
+                            snprintf(dev->device_id, sizeof(dev->device_id), "%s", serial);
+                        }
+                        libusb_close(tmp_handle);
+                    }
+                }
                 dev->supports_1080p60 = false;  /* N/A for FX3 */
             }
         }
@@ -268,7 +240,6 @@ int misrc_device_enumerate_fx3(misrc_device_list_t *list, bool include_hsdaoh,
 
     libusb_free_device_list(devlist, 1);
     libusb_exit(ctx);
-#endif
 
     return (int)list->count;
 }

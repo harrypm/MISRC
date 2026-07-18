@@ -218,31 +218,40 @@ else
   message('FFTW3 not found; misrc_gui requires fftw3f and will fail to configure until it is installed')
 endif
 
-# FX3 support (optional, Linux uses cyusb, others use libusb)
+# FX3 support: build the vendored cyusb compatibility shim from source on
+# ALL platforms (Linux, Windows, macOS) when libusb-1.0 is present. The real
+# Cypress cyusb library is Linux-only and not packaged by distros; the previous
+# external libcyusb pkg-config lookup had no package and was faked via an
+# ephemeral /tmp cwrap that broke the build after reboot. Building the shim
+# from source in-tree makes FX3 native on every platform: no external
+# libcyusb package needed anywhere, no system libcyusb can shadow a vendored
+# copy (the dep is built in-tree), and local == CI. The shim is a faithful
+# drop-in: cyusb_handle aliases libusb_device_handle, matching the existing
+# call sites in gui_fx3.c which pass handles directly to libusb_* functions.
+# The shim uses LIBUSB_API_VERSION + __has_include so it builds on every OS.
 fx3_enabled = false
-if host_system == 'linux'
-  cyusb_dep = dependency('libcyusb', required : false)
-  if cyusb_dep.found()
-    deps += [ cyusb_dep ]
-    cflags += ['-DENABLE_FX3=1']
-    fx3_enabled = true
-    message('libcyusb found, building with FX3 support')
-  else
-    message('libcyusb not found, building without FX3 support')
+if libusb_common_dep.found()
+  if not libusb_common_dep_added
+    deps += [ libusb_common_dep ]
+    libusb_common_dep_added = true
   endif
+  cyusb_inc = include_directories('../third_party/cyusb')
+  cyusb_compat_lib = static_library('cyusb_compat',
+    '../third_party/cyusb/cyusb.c',
+    include_directories: cyusb_inc,
+    dependencies: [ libusb_common_dep ],
+  )
+  cyusb_dep = declare_dependency(
+    link_with: cyusb_compat_lib,
+    include_directories: cyusb_inc,
+    dependencies: [ libusb_common_dep ],
+  )
+  deps += [ cyusb_dep ]
+  cflags += ['-DENABLE_FX3=1']
+  fx3_enabled = true
+  message('Vendored cyusb shim + libusb-1.0 found, building with FX3 support')
 else
-  # On non-Linux platforms, use libusb for FX3
-  if libusb_common_dep.found()
-    if not libusb_common_dep_added
-      deps += [ libusb_common_dep ]
-      libusb_common_dep_added = true
-    endif
-    cflags += ['-DENABLE_FX3=1']
-    fx3_enabled = true
-    message('libusb found, building with FX3 support')
-  else
-    message('libusb not found, building without FX3 support')
-  endif
+  message('libusb-1.0 not found, building without FX3 support')
 endif
 
 # DdD (DomesdayDuplicator) support (optional, uses libusb on all platforms)
