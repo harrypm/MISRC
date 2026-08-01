@@ -17,6 +17,7 @@
 #include <stdint.h>
 #include <string.h>
 #include <stdatomic.h>
+#include <time.h>
 
 #if LIBFLAC_ENABLED == 1
 #include "FLAC/stream_decoder.h"
@@ -405,6 +406,7 @@ static int playback_thread_func(void *ctx_ptr) {
     atomic_store(&app->sample_rate, PLAYBACK_SAMPLE_RATE);
 
     uint64_t batch_count = 0;
+    const uint32_t raw_silence = encode_raw_sample(0, 0);
 
     while (atomic_load(&ctx->running)) {
         // Check for pause state
@@ -462,6 +464,8 @@ static int playback_thread_func(void *ctx_ptr) {
         // Calculate how many samples we can output
         size_t avail_a = ctx->decode_available_a - ctx->decode_pos_a;
         size_t avail_b = ctx->decode_available_b - ctx->decode_pos_b;
+        bool channel_a_loaded = (ctx->file_a != NULL);
+        bool channel_b_loaded = (ctx->file_b != NULL);
         size_t samples_to_output = RAW_BUFFER_SAMPLES;
 
         // Check for EOF on each channel independently and loop each one
@@ -494,10 +498,10 @@ static int playback_thread_func(void *ctx_ptr) {
 #endif
 
         // Limit output to available samples
-        if (ctx->decode_buf_a && avail_a < samples_to_output) {
+        if (channel_a_loaded && avail_a < samples_to_output) {
             samples_to_output = avail_a;
         }
-        if (ctx->decode_buf_b && avail_b < samples_to_output) {
+        if (channel_b_loaded && avail_b < samples_to_output) {
             samples_to_output = avail_b;
         }
 
@@ -507,7 +511,7 @@ static int playback_thread_func(void *ctx_ptr) {
         }
 
         // Fill output buffers
-        if (ctx->decode_buf_a && avail_a > 0) {
+        if (channel_a_loaded && avail_a > 0) {
             size_t to_copy = (avail_a < samples_to_output) ? avail_a : samples_to_output;
             memcpy(buf_a, ctx->decode_buf_a + ctx->decode_pos_a, to_copy * sizeof(int16_t));
             ctx->decode_pos_a += to_copy;
@@ -519,7 +523,7 @@ static int playback_thread_func(void *ctx_ptr) {
             memset(buf_a, 0, samples_to_output * sizeof(int16_t));
         }
 
-        if (ctx->decode_buf_b && avail_b > 0) {
+        if (channel_b_loaded && avail_b > 0) {
             size_t to_copy = (avail_b < samples_to_output) ? avail_b : samples_to_output;
             memcpy(buf_b, ctx->decode_buf_b + ctx->decode_pos_b, to_copy * sizeof(int16_t));
             ctx->decode_pos_b += to_copy;
@@ -531,7 +535,7 @@ static int playback_thread_func(void *ctx_ptr) {
         }
 
         // Compact decode buffers if needed (shift remaining data to start)
-        if (ctx->decode_pos_a > ctx->decode_buf_size / 2) {
+        if (channel_a_loaded && ctx->decode_pos_a > ctx->decode_buf_size / 2) {
             size_t remaining = ctx->decode_available_a - ctx->decode_pos_a;
             if (remaining > 0) {
                 memmove(ctx->decode_buf_a, ctx->decode_buf_a + ctx->decode_pos_a,
@@ -540,7 +544,7 @@ static int playback_thread_func(void *ctx_ptr) {
             ctx->decode_available_a = remaining;
             ctx->decode_pos_a = 0;
         }
-        if (ctx->decode_pos_b > ctx->decode_buf_size / 2) {
+        if (channel_b_loaded && ctx->decode_pos_b > ctx->decode_buf_size / 2) {
             size_t remaining = ctx->decode_available_b - ctx->decode_pos_b;
             if (remaining > 0) {
                 memmove(ctx->decode_buf_b, ctx->decode_buf_b + ctx->decode_pos_b,
@@ -558,6 +562,9 @@ static int playback_thread_func(void *ctx_ptr) {
             // Encode int16 samples to raw format
             for (size_t i = 0; i < samples_to_output; i++) {
                 raw_buf[i] = encode_raw_sample(buf_a[i], buf_b[i]);
+            }
+            for (size_t i = samples_to_output; i < RAW_BUFFER_SAMPLES; i++) {
+                raw_buf[i] = raw_silence;
             }
             bufmgr_write_end(&app->buffers, BUF_CAPTURE_RF, RAW_BUFFER_BYTES);
         } else {
@@ -742,6 +749,28 @@ int gui_playback_start(gui_app_t *app, const char *file_a, const char *file_b) {
     atomic_store(&app->stream_synced, false);
     atomic_store(&app->sample_rate, PLAYBACK_SAMPLE_RATE);
     atomic_store(&app->last_callback_time_ms, get_time_ms());
+    app->capture_backend_upstream = false;
+    app->capture_has_channel_b = (s_playback.file_b != NULL);
+    app->capture_mode_runtime_misrc = app->user_capture_mode_misrc;
+    app->capture_start_time = GetTime();
+    app->reconnect_pending = false;
+    app->reconnect_attempts = 0;
+    {
+        time_t t = time(NULL);
+        struct tm tmv;
+#if defined(_WIN32) || defined(_WIN64)
+        localtime_s(&tmv, &t);
+#else
+        localtime_r(&t, &tmv);
+#endif
+        snprintf(app->capture_timestamp, sizeof(app->capture_timestamp), "%04d.%02d.%02d_%02d.%02d.%02d",
+                 (tmv.tm_year + 1900),
+                 tmv.tm_mon + 1,
+                 tmv.tm_mday,
+                 tmv.tm_hour,
+                 tmv.tm_min,
+                 tmv.tm_sec);
+    }
 
     app->display_samples_available_a = 0;
     app->display_samples_available_b = 0;
@@ -816,6 +845,10 @@ error_cleanup:
     free(s_playback.decode_buf_b);
     s_playback.decode_buf_a = NULL;
     s_playback.decode_buf_b = NULL;
+    app->is_capturing = false;
+    app->capture_timestamp[0] = '\0';
+    app->capture_backend_upstream = false;
+    app->capture_has_channel_b = true;
 
     gui_app_set_status(app, "Playback failed to start");
     return -1;
@@ -871,6 +904,9 @@ void gui_playback_stop(gui_app_t *app) {
     free(s_playback.decode_buf_b);
     s_playback.decode_buf_a = NULL;
     s_playback.decode_buf_b = NULL;
+    app->capture_timestamp[0] = '\0';
+    app->capture_backend_upstream = false;
+    app->capture_has_channel_b = true;
 
     atomic_store(&app->stream_synced, false);
 

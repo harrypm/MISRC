@@ -72,6 +72,12 @@ static bool gui_ui_selected_device_is_cxadc(const gui_app_t *app, bool *clockgen
     }
     return true;
 }
+static bool gui_ui_selected_device_is_playback(const gui_app_t *app)
+{
+    if (!app) return false;
+    if (app->selected_device < 0 || app->selected_device >= app->device_count) return false;
+    return app->devices[app->selected_device].type == DEVICE_TYPE_PLAYBACK;
+}
 
 #ifdef ENABLE_DDD
 // DdD is single-channel (channel A only); channel B has no signal source.
@@ -367,6 +373,78 @@ static inline void gui_ui_set_click_consumed(void) { // 130226 - added
 static inline Clay_Color to_clay_color(Color c) {
     return (Clay_Color){ c.r, c.g, c.b, c.a };
 }
+static void format_playback_timecode(char *dst, size_t dst_len, double seconds)
+{
+    if (!dst || dst_len == 0) return;
+    if (!isfinite(seconds) || seconds < 0.0) {
+        seconds = 0.0;
+    }
+    uint64_t total_secs = (uint64_t)seconds;
+    uint64_t hours = total_secs / 3600ULL;
+    uint64_t mins = (total_secs / 60ULL) % 60ULL;
+    uint64_t secs = total_secs % 60ULL;
+    snprintf(dst, dst_len, "%02llu:%02llu:%02llu",
+             (unsigned long long)hours,
+             (unsigned long long)mins,
+             (unsigned long long)secs);
+}
+static uint64_t gui_ui_playback_channel_total_samples(gui_app_t *app, int channel_index)
+{
+    if (!app) return 0;
+    playback_file_info_t info;
+    (void)((channel_index == 0)
+        ? gui_playback_get_file_info_a(app, &info)
+        : gui_playback_get_file_info_b(app, &info));
+    if (info.total_samples == 0) return 0;
+    return info.total_samples;
+}
+static void gui_ui_format_playback_timeline(char *dst, size_t dst_len, int *out_fill_w, bool *out_has_file,
+                                            uint64_t current_sample, uint64_t total_samples, int track_width_px)
+{
+    if (!dst || dst_len == 0) return;
+    if (out_fill_w) *out_fill_w = 0;
+    if (out_has_file) *out_has_file = false;
+
+    if (total_samples == 0 || track_width_px <= 0) {
+        snprintf(dst, dst_len, "--:--:--/--:--:--");
+        return;
+    }
+    if (out_has_file) *out_has_file = true;
+    uint64_t channel_sample = current_sample;
+    if (channel_sample >= total_samples) {
+        channel_sample %= total_samples;
+    }
+    double playback_pos_s = (double)channel_sample / PLAYBACK_SAMPLE_RATE;
+    double playback_total_s = (double)total_samples / PLAYBACK_SAMPLE_RATE;
+    char pos_tc[16];
+    char total_tc[16];
+    format_playback_timecode(pos_tc, sizeof(pos_tc), playback_pos_s);
+    format_playback_timecode(total_tc, sizeof(total_tc), playback_total_s);
+    snprintf(dst, dst_len, "%s/%s", pos_tc, total_tc);
+    int fill_w = (int)round(((double)channel_sample / (double)total_samples) * (double)track_width_px);
+    if (fill_w < 0) fill_w = 0;
+    if (fill_w > track_width_px) fill_w = track_width_px;
+    if (out_fill_w) *out_fill_w = fill_w;
+}
+static bool gui_ui_seek_playback_from_track(gui_app_t *app, int track_index, float mouse_x)
+{
+    if (!app) return false;
+    Clay_ElementData track = Clay_GetElementData(CLAY_IDI("PlaybackTimelineTrack", track_index));
+    if (!track.found) return false;
+    float track_width = track.boundingBox.width;
+    if (track_width <= 1.0f) return false;
+    uint64_t channel_total_samples = gui_ui_playback_channel_total_samples(app, track_index);
+    if (channel_total_samples == 0) return false;
+    float t = (mouse_x - track.boundingBox.x) / track_width;
+    if (t < 0.0f) t = 0.0f;
+    if (t > 1.0f) t = 1.0f;
+    uint64_t target_sample = (uint64_t)floor((double)t * (double)channel_total_samples);
+    if (target_sample >= channel_total_samples) {
+        target_sample = channel_total_samples - 1;
+    }
+    gui_playback_seek_sample(app, target_sample);
+    return true;
+}
 
 // Format helpers - use separate buffers to avoid overwriting
 static char temp_buf1[64];
@@ -391,6 +469,10 @@ static char stat_rec_duration[2][24];
 // Playback file display buffers
 static char playback_file_a_display[64];
 static char playback_file_b_display[64];
+static char playback_timeline_display_a[48];
+static char playback_timeline_display_b[48];
+static bool s_playback_scrub_active = false;
+static int s_playback_scrub_track_index = 0;
 
 // Audio meter channel labels (static buffers)
 static char audio_ch_label[4][8];
@@ -3169,9 +3251,21 @@ static void render_toolbar(gui_app_t *app) {
                 }
             }
         }
-        // Record button - updated to support finalising code
+        bool playback_mode = gui_ui_selected_device_is_playback(app);
+        bool playback_running = playback_mode && gui_playback_is_running(app);
+        playback_state_t playback_state = playback_running
+            ? gui_playback_get_state(app)
+            : PLAYBACK_STATE_STOPPED;
+        bool playback_paused = (playback_state == PLAYBACK_STATE_PAUSED);
+
+        // Record button (capture) / Play-Pause button (playback mode)
         bool record_finalizing = gui_record_is_finalizing();
         Color record_color = record_finalizing ? (Color){184, 118, 20, 255} : (app->is_recording ? COLOR_CLIP_RED : COLOR_BUTTON);
+        const char *record_label = record_finalizing ? "Finalize" : (app->is_recording ? "Stop Rec" : "Record");
+        if (playback_mode) {
+            record_label = (!app->is_capturing || playback_paused) ? "Play" : "Pause";
+            record_color = playback_paused ? COLOR_SYNC_GREEN : COLOR_BUTTON_ACTIVE;
+        }
         if (!app->is_capturing) record_color = (Color){ 50, 50, 55, 255 };
         CLAY(CLAY_ID("RecordButton"), {
             .layout = {
@@ -3182,13 +3276,27 @@ static void render_toolbar(gui_app_t *app) {
             .cornerRadius = CLAY_CORNER_RADIUS(4)
         }) {
             Color text_color = app->is_capturing ? COLOR_TEXT : COLOR_TEXT_DIM;
-            CLAY_TEXT(record_finalizing ? CLAY_STRING("Finalize") : (app->is_recording ? CLAY_STRING("Stop Rec") : CLAY_STRING("Record")),
+            CLAY_TEXT(make_string(record_label),
                 CLAY_TEXT_CONFIG({ .fontSize = FONT_SIZE_NORMAL, .textColor = to_clay_color(text_color) }));
         }
-        // Record limit button (clock icon)
-        Color limit_button_color = s_record_limit_window_open
-            ? COLOR_BUTTON_ACTIVE
-            : (s_record_limit_armed ? COLOR_SYNC_GREEN : COLOR_BUTTON);
+        // Record-limit button (normal mode) / Loop button (playback mode)
+        bool playback_loop_on = playback_mode && gui_playback_get_loop(app);
+        s_record_limit_icon_element.type = playback_mode
+            ? CUSTOM_LAYOUT_ELEMENT_TYPE_LOOP_ICON
+            : CUSTOM_LAYOUT_ELEMENT_TYPE_CLOCK_ICON;
+        int record_limit_icon_size = playback_mode ? 20 : 18;
+        Color limit_button_color = COLOR_BUTTON;
+        if (playback_mode) {
+            if (!app->is_capturing) {
+                limit_button_color = (Color){ 50, 50, 55, 255 };
+            } else {
+                limit_button_color = playback_loop_on ? COLOR_BUTTON_ACTIVE : COLOR_BUTTON;
+            }
+        } else {
+            limit_button_color = s_record_limit_window_open
+                ? COLOR_BUTTON_ACTIVE
+                : (s_record_limit_armed ? COLOR_SYNC_GREEN : COLOR_BUTTON);
+        }
         CLAY(CLAY_ID("RecordLimitButton"), {
             .layout = {
                 .sizing = { CLAY_SIZING_FIXED(32), CLAY_SIZING_FIXED(32) },
@@ -3198,7 +3306,7 @@ static void render_toolbar(gui_app_t *app) {
             .cornerRadius = CLAY_CORNER_RADIUS(4)
         }) {
             CLAY(CLAY_ID("RecordLimitIcon"), {
-                .layout = { .sizing = { CLAY_SIZING_FIXED(18), CLAY_SIZING_FIXED(18) } },
+                .layout = { .sizing = { CLAY_SIZING_FIXED(record_limit_icon_size), CLAY_SIZING_FIXED(record_limit_icon_size) } },
                 .custom = { .customData = &s_record_limit_icon_element }
             }) {}
         }
@@ -3599,6 +3707,63 @@ static void render_channel_stats(gui_app_t *app, int channel) {
     }
 }
 
+// Render one playback timeline row (used for Channel A and Channel B in playback mode).
+static void render_playback_timeline_row(int channel_index, const char *timeline_text, int track_width_px, int fill_w, bool enabled)
+{
+    Color timeline_text_color = enabled ? COLOR_TEXT : COLOR_TEXT_DIM;
+    Color timeline_track_color = enabled ? (Color){45, 45, 52, 255} : (Color){33, 33, 38, 255};
+    Color timeline_fill_color = enabled ? COLOR_SYNC_GREEN : COLOR_TEXT_DIM;
+    CLAY(CLAY_IDI("PlaybackTimelineRow", channel_index), {
+        .layout = {
+            .sizing = { CLAY_SIZING_GROW(0), CLAY_SIZING_FIXED(24) },
+            .layoutDirection = CLAY_LEFT_TO_RIGHT,
+            .childAlignment = { .y = CLAY_ALIGN_Y_CENTER },
+            .childGap = 4
+        }
+    }) {
+        CLAY(CLAY_IDI("PlaybackTimelineLeftPad", channel_index), {
+            .layout = { .sizing = { CLAY_SIZING_FIXED(74), CLAY_SIZING_GROW(0) } }
+        }) {}
+
+        CLAY(CLAY_IDI("PlaybackTimeline", channel_index), {
+            .layout = {
+                .sizing = { CLAY_SIZING_GROW(0), CLAY_SIZING_FIXED(22) },
+                .layoutDirection = CLAY_LEFT_TO_RIGHT,
+                .childAlignment = { .y = CLAY_ALIGN_Y_CENTER },
+                .childGap = 8
+            }
+        }) {
+            CLAY(CLAY_IDI("PlaybackTimelineLabel", channel_index), {
+                .layout = { .sizing = { CLAY_SIZING_FIXED(150), CLAY_SIZING_FIT(0) } }
+            }) {
+                CLAY_TEXT(make_string(timeline_text),
+                    CLAY_TEXT_CONFIG({ .fontSize = FONT_SIZE_STATUS, .fontId = 1, .textColor = to_clay_color(timeline_text_color) }));
+            }
+
+            CLAY(CLAY_IDI("PlaybackTimelineTrack", channel_index), {
+                .layout = {
+                    .sizing = { CLAY_SIZING_FIXED(track_width_px), CLAY_SIZING_FIXED(10) },
+                    .layoutDirection = CLAY_LEFT_TO_RIGHT
+                },
+                .backgroundColor = to_clay_color(timeline_track_color),
+                .cornerRadius = CLAY_CORNER_RADIUS(5)
+            }) {
+                if (fill_w > 0) {
+                    CLAY(CLAY_IDI("PlaybackTimelineFill", channel_index), {
+                        .layout = { .sizing = { CLAY_SIZING_FIXED(fill_w), CLAY_SIZING_GROW(0) } },
+                        .backgroundColor = to_clay_color(timeline_fill_color),
+                        .cornerRadius = CLAY_CORNER_RADIUS(5)
+                    }) {}
+                }
+            }
+        }
+
+        CLAY(CLAY_IDI("PlaybackTimelineRightPad", channel_index), {
+            .layout = { .sizing = { CLAY_SIZING_FIXED(189), CLAY_SIZING_GROW(0) } }
+        }) {}
+    }
+}
+
 // Render the channels panel - each channel has VU meter + waveform + stats grouped together
 static void render_channels_panel(gui_app_t *app) {
 #ifdef ENABLE_DDD
@@ -3610,6 +3775,7 @@ static void render_channels_panel(gui_app_t *app) {
 #else
     bool ddd_single_channel = false;
 #endif
+    bool playback_mode = gui_ui_selected_device_is_playback(app);
 
     // Setup custom element data for this frame
     s_vu_a_element.type = CUSTOM_LAYOUT_ELEMENT_TYPE_VU_METER;
@@ -3645,6 +3811,27 @@ static void render_channels_panel(gui_app_t *app) {
         },
         .backgroundColor = to_clay_color(COLOR_PANEL_BG)
     }) {
+        const int playback_track_width_px = 300;
+        int playback_fill_w_a = 0;
+        int playback_fill_w_b = 0;
+        bool playback_has_file_a = false;
+        bool playback_has_file_b = false;
+        snprintf(playback_timeline_display_a, sizeof(playback_timeline_display_a), "--:--:--/--:--:--");
+        snprintf(playback_timeline_display_b, sizeof(playback_timeline_display_b), "--:--:--/--:--:--");
+        if (playback_mode) {
+            uint64_t current_sample = gui_playback_get_position_samples(app);
+            uint64_t total_samples_a = gui_ui_playback_channel_total_samples(app, 0);
+            uint64_t total_samples_b = gui_ui_playback_channel_total_samples(app, 1);
+            gui_ui_format_playback_timeline(playback_timeline_display_a, sizeof(playback_timeline_display_a),
+                                            &playback_fill_w_a, &playback_has_file_a,
+                                            current_sample, total_samples_a, playback_track_width_px);
+            gui_ui_format_playback_timeline(playback_timeline_display_b, sizeof(playback_timeline_display_b),
+                                            &playback_fill_w_b, &playback_has_file_b,
+                                            current_sample, total_samples_b, playback_track_width_px);
+
+            // Playback scrub row aligned with Channel A preview.
+            render_playback_timeline_row(0, playback_timeline_display_a, playback_track_width_px, playback_fill_w_a, playback_has_file_a);
+        }
         // Channel A row: VU meter + waveform + stats
         CLAY(CLAY_ID("ChannelARow"), {
             .layout = {
@@ -3673,6 +3860,10 @@ static void render_channels_panel(gui_app_t *app) {
         // Hidden entirely for DdD (single-channel device) — channel A expands
         // to fill the full preview height instead.
         if (!ddd_single_channel) {
+            if (playback_mode) {
+                // Second playback scrub row aligned with Channel B preview.
+                render_playback_timeline_row(1, playback_timeline_display_b, playback_track_width_px, playback_fill_w_b, playback_has_file_b);
+            }
             CLAY(CLAY_ID("ChannelBRow"), {
                 .layout = {
                     .sizing = { CLAY_SIZING_GROW(0), CLAY_SIZING_GROW(0) },
@@ -3995,7 +4186,9 @@ void gui_render_layout(gui_app_t *app) {
     render_settings_panel(app);
 
     // Record-limit popup overlay (if open)
-    render_record_limit_window(app);
+    if (!gui_ui_selected_device_is_playback(app)) {
+        render_record_limit_window(app);
+    }
 
     // Version info popup overlay (if open)
     render_version_info_window(app);
@@ -4047,6 +4240,23 @@ void gui_handle_interactions(gui_app_t *app) {
     s_ui_consumed_click = false;
     gui_ui_sync_capture_mode_state(app);
     gui_record_limit_runtime_tick(app);
+    bool playback_mode = gui_ui_selected_device_is_playback(app);
+    if (playback_mode) {
+        s_record_limit_window_open = false;
+        s_record_limit_timecode_edit = false;
+    }
+    if (!IsMouseButtonDown(MOUSE_LEFT_BUTTON)) {
+        s_playback_scrub_active = false;
+    } else if (s_playback_scrub_active &&
+               app->is_capturing &&
+               playback_mode &&
+               !s_record_limit_window_open &&
+               !s_version_info_window_open &&
+               !s_metadata_window_open) {
+        if (!gui_ui_seek_playback_from_track(app, s_playback_scrub_track_index, GetMousePosition().x)) {
+            s_playback_scrub_active = false;
+        }
+    }
 
     if (s_record_limit_window_open && !s_record_limit_timecode_edit && IsKeyPressed(KEY_ESCAPE)) {
         s_record_limit_window_open = false;
@@ -4404,6 +4614,15 @@ void gui_handle_interactions(gui_app_t *app) {
         }
 
         if (Clay_PointerOver(CLAY_ID("RecordLimitButton"))) {
+            if (playback_mode) {
+                if (app->is_capturing && gui_playback_is_running(app)) {
+                    bool loop_enabled = gui_playback_get_loop(app);
+                    gui_playback_set_loop(app, !loop_enabled);
+                    gui_app_set_status(app, !loop_enabled ? "Playback loop enabled" : "Playback loop disabled");
+                }
+                gui_ui_set_click_consumed();
+                return;
+            }
             s_record_limit_window_open = !s_record_limit_window_open;
             if (!s_record_limit_window_open) {
                 s_record_limit_timecode_edit = false;
@@ -4423,6 +4642,32 @@ void gui_handle_interactions(gui_app_t *app) {
             s_metadata_window_open = !s_metadata_window_open;
             if (s_metadata_window_open) {
                 s_version_info_window_open = false;
+            }
+            gui_ui_set_click_consumed();
+            return;
+        }
+        if (app->is_capturing &&
+            gui_ui_selected_device_is_playback(app) &&
+            Clay_PointerOver(CLAY_IDI("PlaybackTimelineTrack", 0))) {
+            s_playback_scrub_track_index = 0;
+            if (gui_ui_seek_playback_from_track(app, s_playback_scrub_track_index, GetMousePosition().x)) {
+                s_playback_scrub_active = true;
+            } else {
+                s_playback_scrub_active = false;
+                gui_app_set_status(app, "No playback file loaded for CH A");
+            }
+            gui_ui_set_click_consumed();
+            return;
+        }
+        if (app->is_capturing &&
+            gui_ui_selected_device_is_playback(app) &&
+            Clay_PointerOver(CLAY_IDI("PlaybackTimelineTrack", 1))) {
+            s_playback_scrub_track_index = 1;
+            if (gui_ui_seek_playback_from_track(app, s_playback_scrub_track_index, GetMousePosition().x)) {
+                s_playback_scrub_active = true;
+            } else {
+                s_playback_scrub_active = false;
+                gui_app_set_status(app, "No playback file loaded for CH B");
             }
             gui_ui_set_click_consumed();
             return;
@@ -4535,13 +4780,27 @@ void gui_handle_interactions(gui_app_t *app) {
 
         // Check record button - UI indicates record-write to disk finialization
         // Mitigate app appearing hung
-        if (Clay_PointerOver(CLAY_ID("RecordButton")) && app->is_capturing) {
-            if (gui_record_is_finalizing()) {
-                gui_app_set_status(app, "Finalizing previous recording...");
-            } else if (app->is_recording) {
-                gui_app_stop_recording(app);
-            } else {
-                gui_app_start_recording(app);
+        if (Clay_PointerOver(CLAY_ID("RecordButton"))) {
+            if (gui_ui_selected_device_is_playback(app)) {
+                if (app->is_capturing && gui_playback_is_running(app)) {
+                    gui_playback_toggle_pause(app);
+                    if (gui_playback_get_state(app) == PLAYBACK_STATE_PAUSED) {
+                        gui_app_set_status(app, "Playback paused");
+                    } else {
+                        gui_app_set_status(app, "Playback resumed");
+                    }
+                }
+                gui_ui_set_click_consumed();
+                return;
+            }
+            if (app->is_capturing) {
+                if (gui_record_is_finalizing()) {
+                    gui_app_set_status(app, "Finalizing previous recording...");
+                } else if (app->is_recording) {
+                    gui_app_stop_recording(app);
+                } else {
+                    gui_app_start_recording(app);
+                }
             }
         }
 
