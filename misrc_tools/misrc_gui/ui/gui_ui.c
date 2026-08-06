@@ -388,24 +388,38 @@ static void format_playback_timecode(char *dst, size_t dst_len, double seconds)
              (unsigned long long)mins,
              (unsigned long long)secs);
 }
-static uint64_t gui_ui_playback_channel_total_samples(gui_app_t *app, int channel_index)
+static bool gui_ui_playback_channel_timeline_info(gui_app_t *app, int channel_index,
+                                                  uint64_t *out_total_samples,
+                                                  double *out_duration_seconds)
 {
-    if (!app) return 0;
-    playback_file_info_t info;
+    if (out_total_samples) *out_total_samples = 0;
+    if (out_duration_seconds) *out_duration_seconds = 0.0;
+    if (!app) return false;
+
+    playback_file_info_t info = {0};
     (void)((channel_index == 0)
         ? gui_playback_get_file_info_a(app, &info)
         : gui_playback_get_file_info_b(app, &info));
-    if (info.total_samples == 0) return 0;
-    return info.total_samples;
+
+    if (info.total_samples == 0) return false;
+    double duration_seconds = info.duration_seconds;
+    if (!(duration_seconds > 0.0) || !isfinite(duration_seconds)) {
+        return false;
+    }
+
+    if (out_total_samples) *out_total_samples = info.total_samples;
+    if (out_duration_seconds) *out_duration_seconds = duration_seconds;
+    return true;
 }
 static void gui_ui_format_playback_timeline(char *dst, size_t dst_len, int *out_fill_w, bool *out_has_file,
-                                            uint64_t current_sample, uint64_t total_samples, int track_width_px)
+                                            uint64_t current_sample, uint64_t total_samples,
+                                            double total_duration_seconds, int track_width_px)
 {
     if (!dst || dst_len == 0) return;
     if (out_fill_w) *out_fill_w = 0;
     if (out_has_file) *out_has_file = false;
-
-    if (total_samples == 0 || track_width_px <= 0) {
+    if (total_samples == 0 || track_width_px <= 0 ||
+        !(total_duration_seconds > 0.0) || !isfinite(total_duration_seconds)) {
         snprintf(dst, dst_len, "--:--:--/--:--:--");
         return;
     }
@@ -414,14 +428,15 @@ static void gui_ui_format_playback_timeline(char *dst, size_t dst_len, int *out_
     if (channel_sample >= total_samples) {
         channel_sample %= total_samples;
     }
-    double playback_pos_s = (double)channel_sample / PLAYBACK_SAMPLE_RATE;
-    double playback_total_s = (double)total_samples / PLAYBACK_SAMPLE_RATE;
+    double t = (double)channel_sample / (double)total_samples;
+    double playback_pos_s = t * total_duration_seconds;
+    double playback_total_s = total_duration_seconds;
     char pos_tc[16];
     char total_tc[16];
     format_playback_timecode(pos_tc, sizeof(pos_tc), playback_pos_s);
     format_playback_timecode(total_tc, sizeof(total_tc), playback_total_s);
     snprintf(dst, dst_len, "%s/%s", pos_tc, total_tc);
-    int fill_w = (int)round(((double)channel_sample / (double)total_samples) * (double)track_width_px);
+    int fill_w = (int)round(t * (double)track_width_px);
     if (fill_w < 0) fill_w = 0;
     if (fill_w > track_width_px) fill_w = track_width_px;
     if (out_fill_w) *out_fill_w = fill_w;
@@ -433,8 +448,11 @@ static bool gui_ui_seek_playback_from_track(gui_app_t *app, int track_index, flo
     if (!track.found) return false;
     float track_width = track.boundingBox.width;
     if (track_width <= 1.0f) return false;
-    uint64_t channel_total_samples = gui_ui_playback_channel_total_samples(app, track_index);
-    if (channel_total_samples == 0) return false;
+    uint64_t channel_total_samples = 0;
+    double channel_duration_seconds = 0.0;
+    if (!gui_ui_playback_channel_timeline_info(app, track_index, &channel_total_samples, &channel_duration_seconds)) {
+        return false;
+    }
     float t = (mouse_x - track.boundingBox.x) / track_width;
     if (t < 0.0f) t = 0.0f;
     if (t > 1.0f) t = 1.0f;
@@ -442,7 +460,7 @@ static bool gui_ui_seek_playback_from_track(gui_app_t *app, int track_index, flo
     if (target_sample >= channel_total_samples) {
         target_sample = channel_total_samples - 1;
     }
-    gui_playback_seek_sample(app, target_sample);
+    gui_playback_seek_sample_channel(app, track_index, target_sample);
     return true;
 }
 
@@ -2681,6 +2699,42 @@ static void render_version_info_window(gui_app_t *app)
                 CLAY_TEXT_CONFIG({ .fontSize = FONT_SIZE_STATS, .textColor = to_clay_color(COLOR_TEXT_DIM) }));
         }
 
+        // Memory budget cycle (1/2/4/8/16 GB). Applies immediately when idle
+        // by re-initializing the buffer manager; disabled while capturing or
+        // recording since re-init would disrupt the live data path.
+        {
+            static char mem_budget_label[24];
+            uint32_t gb = app->settings.memory_budget_gb;
+            if (gb < 1) gb = 1;
+            if (gb > 16) gb = 16;
+            snprintf(mem_budget_label, sizeof(mem_budget_label), "%u GB", (unsigned)gb);
+            bool mem_busy = (app->is_capturing || app->is_recording);
+            Color mem_bg = mem_busy ? ui_disabled_color(COLOR_BUTTON)
+                                    : (COLOR_BUTTON_ACTIVE);
+            Color mem_fg = mem_busy ? ui_disabled_color(COLOR_TEXT) : COLOR_TEXT;
+            CLAY(CLAY_ID("VersionInfoMemoryBudgetRow"), {
+                .layout = { .sizing = { CLAY_SIZING_GROW(0), CLAY_SIZING_FIT(0) }, .layoutDirection = CLAY_LEFT_TO_RIGHT, .childAlignment = { .y = CLAY_ALIGN_Y_CENTER }, .childGap = 10 }
+            }) {
+                CLAY(CLAY_ID("VersionInfoMemoryBudgetLabel"), { .layout = { .sizing = { CLAY_SIZING_FIXED(110), CLAY_SIZING_FIT(0) } } }) {
+                    CLAY_TEXT(CLAY_STRING("Memory budget:"),
+                        CLAY_TEXT_CONFIG({ .fontSize = FONT_SIZE_NORMAL, .textColor = to_clay_color(COLOR_TEXT_DIM) }));
+                }
+                CLAY(CLAY_ID("VersionInfoMemoryBudgetToggle"), {
+                    .layout = {
+                        .sizing = { CLAY_SIZING_FIXED(80), CLAY_SIZING_FIXED(28) },
+                        .childAlignment = { .x = CLAY_ALIGN_X_CENTER, .y = CLAY_ALIGN_Y_CENTER }
+                    },
+                    .backgroundColor = to_clay_color(mem_bg),
+                    .cornerRadius = CLAY_CORNER_RADIUS(4)
+                }) {
+                    CLAY_TEXT(make_string(mem_budget_label),
+                        CLAY_TEXT_CONFIG({ .fontSize = FONT_SIZE_NORMAL, .fontId = 1, .textColor = to_clay_color(mem_fg) }));
+                }
+                CLAY_TEXT(CLAY_STRING("max buffer RAM (1/2/4/8/16 GB; applies when idle)"),
+                    CLAY_TEXT_CONFIG({ .fontSize = FONT_SIZE_STATS, .textColor = to_clay_color(COLOR_TEXT_DIM) }));
+            }
+        }
+
         // Copyright
         CLAY_TEXT(CLAY_STRING(MIRSC_TOOLS_COPYRIGHT),
             CLAY_TEXT_CONFIG({ .fontSize = FONT_SIZE_STATS, .textColor = to_clay_color(COLOR_TEXT_DIM) }));
@@ -3819,15 +3873,20 @@ static void render_channels_panel(gui_app_t *app) {
         snprintf(playback_timeline_display_a, sizeof(playback_timeline_display_a), "--:--:--/--:--:--");
         snprintf(playback_timeline_display_b, sizeof(playback_timeline_display_b), "--:--:--/--:--:--");
         if (playback_mode) {
-            uint64_t current_sample = gui_playback_get_position_samples(app);
-            uint64_t total_samples_a = gui_ui_playback_channel_total_samples(app, 0);
-            uint64_t total_samples_b = gui_ui_playback_channel_total_samples(app, 1);
+            uint64_t current_sample_a = gui_playback_get_position_samples_channel(app, 0);
+            uint64_t current_sample_b = gui_playback_get_position_samples_channel(app, 1);
+            uint64_t total_samples_a = 0;
+            uint64_t total_samples_b = 0;
+            double duration_seconds_a = 0.0;
+            double duration_seconds_b = 0.0;
+            (void)gui_ui_playback_channel_timeline_info(app, 0, &total_samples_a, &duration_seconds_a);
+            (void)gui_ui_playback_channel_timeline_info(app, 1, &total_samples_b, &duration_seconds_b);
             gui_ui_format_playback_timeline(playback_timeline_display_a, sizeof(playback_timeline_display_a),
                                             &playback_fill_w_a, &playback_has_file_a,
-                                            current_sample, total_samples_a, playback_track_width_px);
+                                            current_sample_a, total_samples_a, duration_seconds_a, playback_track_width_px);
             gui_ui_format_playback_timeline(playback_timeline_display_b, sizeof(playback_timeline_display_b),
                                             &playback_fill_w_b, &playback_has_file_b,
-                                            current_sample, total_samples_b, playback_track_width_px);
+                                            current_sample_b, total_samples_b, duration_seconds_b, playback_track_width_px);
 
             // Playback scrub row aligned with Channel A preview.
             render_playback_timeline_row(0, playback_timeline_display_a, playback_track_width_px, playback_fill_w_a, playback_has_file_a);
@@ -4378,6 +4437,43 @@ void gui_handle_interactions(gui_app_t *app) {
                 gui_app_set_status(app, app->settings.show_core_pinning_in_settings
                     ? "Core pinning controls shown in Settings"
                     : "Core pinning controls hidden from Settings");
+                gui_ui_set_click_consumed();
+                return;
+            }
+            if (Clay_PointerOver(CLAY_ID("VersionInfoMemoryBudgetToggle"))) {
+                // Cycle 1 -> 2 -> 4 -> 8 -> 16 -> 1 GB. Apply immediately when
+                // idle by tearing down and re-initializing the buffer manager;
+                // block the change while capturing/recording to avoid disrupting
+                // the live data path.
+                if (app->is_capturing || app->is_recording) {
+                    gui_app_set_status(app, "Stop capture/recording to change memory budget");
+                    gui_ui_set_click_consumed();
+                    return;
+                }
+                static const uint32_t cycle[] = { 1, 2, 4, 8, 16 };
+                uint32_t cur = app->settings.memory_budget_gb;
+                if (cur < 1) cur = 1;
+                if (cur > 16) cur = 16;
+                size_t idx = 0;
+                for (size_t i = 0; i < sizeof(cycle) / sizeof(cycle[0]); i++) {
+                    if (cycle[i] == cur) { idx = i; break; }
+                }
+                uint32_t next = cycle[(idx + 1) % (sizeof(cycle) / sizeof(cycle[0]))];
+                app->settings.memory_budget_gb = next;
+                gui_settings_save(&app->settings);
+                bufmgr_cleanup(&app->buffers);
+                if (bufmgr_init_for_budget(&app->buffers, next) != 0) {
+                    // Re-init failed: revert to the previous value so the UI
+                    // label and the actual buffer sizes stay consistent.
+                    app->settings.memory_budget_gb = cur;
+                    gui_settings_save(&app->settings);
+                    (void)bufmgr_init_for_budget(&app->buffers, cur);
+                    gui_app_set_status(app, "Memory budget change failed (reverted)");
+                } else {
+                    char msg[80];
+                    snprintf(msg, sizeof(msg), "Memory budget set to %u GB (applied)", (unsigned)next);
+                    gui_app_set_status(app, msg);
+                }
                 gui_ui_set_click_consumed();
                 return;
             }

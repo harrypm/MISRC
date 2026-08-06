@@ -1000,9 +1000,12 @@ void gui_app_init(gui_app_t *app) {
     gui_capture_configure_handler(app, true);
 
 
-    // Initialize centralized buffer manager
-    if (bufmgr_init(&app->buffers) != 0) {
-        fprintf(stderr, "Failed to initialize buffer manager\n");
+    // Initialize centralized buffer manager with the configured RAM budget
+    // (1-16 GB, default 4 GB). Per-buffer sizes are derived from the budget;
+    // record buffers stay lazy and keep their rb_init fallback chain.
+    if (bufmgr_init_for_budget(&app->buffers, app->settings.memory_budget_gb) != 0) {
+        fprintf(stderr, "Failed to initialize buffer manager (budget=%u GB)\n",
+                (unsigned)app->settings.memory_budget_gb);
     }
 
     // Initialize display thread (allocated, started on capture start)
