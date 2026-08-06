@@ -376,7 +376,7 @@ static inline void gui_capture_update_backpressure_counters(gui_app_t *app)
     s_capture_last_drop_count = drops;
 }
 
-static inline void gui_capture_request_dropout_stop(gui_app_t *app, gui_dropout_reason_t reason)
+void gui_capture_request_dropout_stop(gui_app_t *app, gui_dropout_reason_t reason)
 {
     if (!app || !app->settings.stop_on_dropout) return;
     atomic_store(&app->dropout_stop_reason, (uint32_t)reason);
