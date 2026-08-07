@@ -3316,6 +3316,14 @@ static void render_toolbar(gui_app_t *app) {
         bool record_finalizing = gui_record_is_finalizing();
         Color record_color = record_finalizing ? (Color){184, 118, 20, 255} : (app->is_recording ? COLOR_CLIP_RED : COLOR_BUTTON);
         const char *record_label = record_finalizing ? "Finalize" : (app->is_recording ? "Stop Rec" : "Record");
+        // Flash the finalize icon red if a persistent output-file write error
+        // is active (e.g. file locked by another app) so the user knows the
+        // recording had write issues. Blink at ~1 Hz between the finalize
+        // orange and clip red.
+        if (record_finalizing && gui_record_has_write_error()) {
+            bool blink_on = (fmod(GetTime(), 1.0) < 0.5);
+            record_color = blink_on ? COLOR_CLIP_RED : (Color){184, 118, 20, 255};
+        }
         if (playback_mode) {
             record_label = (!app->is_capturing || playback_paused) ? "Play" : "Pause";
             record_color = playback_paused ? COLOR_SYNC_GREEN : COLOR_BUTTON_ACTIVE;

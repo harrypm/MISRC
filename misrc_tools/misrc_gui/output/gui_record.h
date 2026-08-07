@@ -54,6 +54,11 @@ bool gui_record_is_finalizing(void);
 // Check if recording is active
 bool gui_record_is_active(void);
 
+// Check if any recording channel has a persistent output-file write error
+// (e.g. the file is locked by another app). Used by the UI to flash the
+// finalizing icon when capture ends while the write issue persists.
+bool gui_record_has_write_error(void);
+
 // Append a timestamped capture/record event to the active session log (if any)
 void gui_record_log_capture_event(gui_app_t *app, const char *level, const char *message,
                                   gui_error_class_t error_class, uint32_t error_count);
