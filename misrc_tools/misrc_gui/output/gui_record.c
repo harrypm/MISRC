@@ -837,6 +837,17 @@ bool gui_record_spill_is_forced(int channel) {
     return atomic_load(&s_record_spill[channel].forced_mode);
 }
 
+void gui_record_spill_clear_forced(int channel) {
+    if (!gui_record_spill_valid_channel(channel)) {
+        return;
+    }
+    // Clear the sticky flag so the extraction thread resumes direct
+    // ringbuffer writes. The spill temp file itself is recycled by the
+    // existing gui_record_spill_recycle_if_drained() path once the
+    // writer thread drains it.
+    atomic_store(&s_record_spill[channel].forced_mode, false);
+}
+
 bool gui_record_spill_enqueue(gui_app_t *app, int channel, const int16_t *samples, size_t bytes,
                               uint32_t frame_index, char *error_msg, size_t error_msg_size) {
     if (!gui_record_spill_valid_channel(channel) || !samples || bytes == 0) {

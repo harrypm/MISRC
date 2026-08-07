@@ -61,6 +61,12 @@ void gui_record_log_capture_event(gui_app_t *app, const char *level, const char 
 // Spillover support for record-path backpressure.
 // Channel: 0 = A, 1 = B.
 bool gui_record_spill_is_forced(int channel);
+// Clear the sticky spill-forced flag for a channel. Call this when the
+// in-memory record ringbuffer write succeeds again, so the capture path
+// returns to direct ringbuffer -> FLAC encoding and the spill temp file
+// can be recycled via the existing drain path. Prevents a single
+// backpressure blip from permanently routing recording through disk.
+void gui_record_spill_clear_forced(int channel);
 bool gui_record_spill_enqueue(gui_app_t *app, int channel, const int16_t *samples, size_t bytes,
                               uint32_t frame_index, char *error_msg, size_t error_msg_size);
 

@@ -383,6 +383,19 @@ void gui_capture_request_dropout_stop(gui_app_t *app, gui_dropout_reason_t reaso
     atomic_store(&app->dropout_stop_requested, true);
 }
 
+// Request a capture stop unconditionally, bypassing the stop_on_dropout
+// toggle. Used for frame-level errors that are always dropout-worthy
+// (parser frame-error bursts and persistent missed-frame bursts) so they
+// halt capture even when the user has not enabled stop-on-dropout. Other
+// dropout events (callback gap, device error, backpressure) keep using
+// the gated gui_capture_request_dropout_stop() helper.
+static void gui_capture_force_dropout_stop(gui_app_t *app, gui_dropout_reason_t reason)
+{
+    if (!app) return;
+    atomic_store(&app->dropout_stop_reason, (uint32_t)reason);
+    atomic_store(&app->dropout_stop_requested, true);
+}
+
 static inline void gui_capture_promote_callback_priority_once(void)
 {
     static MISRC_THREAD_LOCAL bool s_capture_callback_thread_priority_set = false;
@@ -606,9 +619,13 @@ static void gui_sync_event_cb(void *user_ctx, frame_sync_result_t result,
                 !s_capture_missed_burst_reported) {
                 atomic_fetch_add(&app->missed_frame_count, 1);
                 s_capture_missed_burst_reported = true;
-                gui_record_log_capture_event(app, "WARN", "Persistent missed-frame burst detected",
+                // Log as ERROR (not WARN) so the burst increments
+                // system_error_count + error_count via gui_record_log_capture_event,
+                // and force a dropout stop so missed-frame bursts always halt
+                // capture regardless of the stop_on_dropout toggle.
+                gui_record_log_capture_event(app, "ERROR", "Persistent missed-frame burst detected",
                                              GUI_ERROR_CLASS_SYSTEM, 1);
-                gui_capture_request_dropout_stop(app, GUI_DROPOUT_MISSED_FRAME);
+                gui_capture_force_dropout_stop(app, GUI_DROPOUT_MISSED_FRAME);
             }
             break;
         case FRAME_SYNC_ACQUIRED:
@@ -756,9 +773,12 @@ void gui_capture_callback(void *data_info_ptr) {
             fprintf(stderr, "[CB] %d frame errors, %u frames since last error\n",
                     result.error_count, s_capture_handler.frame_state.frames_since_error);
         }
-        if (app->settings.stop_on_dropout) {
-            gui_capture_request_dropout_stop(app, GUI_DROPOUT_FRAME_ERROR);
-        }
+        // Frame errors are always dropout-worthy: force a stop regardless of
+        // the stop_on_dropout toggle so parser frame-error bursts always halt
+        // capture (the user explicitly wants frame errors to count and stop).
+        // Tolerated CRC-only frames (report_errors == false) are still not
+        // counted/dropped, per the MISRC frame-mode tolerated-frame rule.
+        gui_capture_force_dropout_stop(app, GUI_DROPOUT_FRAME_ERROR);
         return;  // Discard frame with errors
     }
 
