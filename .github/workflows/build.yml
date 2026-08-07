@@ -1267,11 +1267,17 @@ jobs:
             printf '%s\n' "- (no commits found in range ${LOG_RANGE})" >> "$BODY_FILE"
           fi
           printf '\n%s\n' '' '## Downloads' '' >> "$BODY_FILE"
-          printf '| Operating System | Minimum OS | x86_64 (Intel / AMD) | arm64 (Apple Silicon / aarch64) |\n' >> "$BODY_FILE"
-          printf '|---|---|---|---|\n' >> "$BODY_FILE"
-          printf '| Microsoft Windows | 10 (1803) | `%s` | `%s` |\n' "windows_MISRC_${TAG}_x86.zip" "windows_MISRC_${TAG}_arm64.zip" >> "$BODY_FILE"
-          printf '| Apple macOS | 10.15 | `%s` (x86_64 + arm64) | `%s` |\n' "macos_MISRC_${TAG}_universal.dmg" "macos_MISRC_${TAG}_universal.dmg" >> "$BODY_FILE"
-          printf '| Linux | libc6 2.35 (Ubuntu 22.04) | `%s` | `%s` |\n' "linux_MISRC_${TAG}_x86.zip" "linux_MISRC_${TAG}_arm64.zip" >> "$BODY_FILE"
+          printf '| Platform | x86_64 (Intel / AMD) | arm64 (Apple Silicon / aarch64) |\n' >> "$BODY_FILE"
+          printf '|---|---|---|\n' >> "$BODY_FILE"
+          DL_BASE="https://github.com/harrypm/MISRC/releases/download/${TAG}"
+          WIN_X86="windows_MISRC_${TAG}_x86.zip"
+          WIN_ARM="windows_MISRC_${TAG}_arm64.zip"
+          MAC_DMG="macos_MISRC_${TAG}_universal.dmg"
+          LIN_X86="linux_MISRC_${TAG}_x86.zip"
+          LIN_ARM="linux_MISRC_${TAG}_arm64.zip"
+          printf '| Windows 10/11 | [%s](%s/%s) | [%s](%s/%s) |\n' "$WIN_X86" "$DL_BASE" "$WIN_X86" "$WIN_ARM" "$DL_BASE" "$WIN_ARM" >> "$BODY_FILE"
+          printf '| macOS 11+ | [%s](%s/%s) | [%s](%s/%s) |\n' "$MAC_DMG" "$DL_BASE" "$MAC_DMG" "$MAC_DMG" "$DL_BASE" "$MAC_DMG" >> "$BODY_FILE"
+          printf '| Linux (Ubuntu 22.04+) | [%s](%s/%s) | [%s](%s/%s) |\n' "$LIN_X86" "$DL_BASE" "$LIN_X86" "$LIN_ARM" "$DL_BASE" "$LIN_ARM" >> "$BODY_FILE"
           printf '\n%s\n' '> [!NOTE]' '> The arm64 Windows build is untested and considered experimental.' >> "$BODY_FILE"
           # Write multi-line output to GITHUB_OUTPUT.
           {
